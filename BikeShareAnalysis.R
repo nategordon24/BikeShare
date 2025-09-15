@@ -1,22 +1,43 @@
 library(tidymodels)
-
+library(tidyverse)
+library(dplyr)
+library(vroom)
 
 train <- vroom("train.csv")
 test <- vroom("test.csv")
 
+#1. Remove casual, registered variables, change count to log(count)
 train <- train |>
-  select(-c(registered,casual))
-head(train)
+  select(-c(registered, casual)) |>
+  mutate(count = log(count))
 
-## Setup and Fit the Linear Regression Model
-my_linear_model <- linear_reg() %>% #Type of model
-  set_engine("lm") %>% # Engine = What R function to use
-  set_mode("regression") %>% # Regression just means quantitative response
-  fit(formula=count~.-datetime, data=train)
+#2. Feature engineering (define recipe)
+bike_recipe <- recipe(count~.,data=train) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = factor(weather)) %>%
+  step_date(datetime,features = "hour") %>%
+  step_mutate(season = factor(season)) %>%
+  step_date(timestamp, features="dow")
+  
+my_linear_model <- linear_reg() %>%
+set_engine("lm") %>%
+set_mode("regression")
 
-## Generate Predictions Using Linear Model
-bike_predictions <- predict(my_linear_model, new_data=test) # Use fit to predict11
-bike_predictions ## Look at the output
+## Combine into a Workflow and fit
+bike_workflow <- workflow() %>%
+add_recipe(bike_recipe) %>%
+add_model(lin_model) %>%
+fit(data=train)
+
+## Run all the steps on test data
+lin_preds <- predict(bike_workflow, new_data = test) %>%
+  mutate(count = exp(.pred))
+
+# Prep and bake the recipe
+prepped_recipe <- prep(bike_recipe)
+baked_train <- bake(prepped_recipe, new_data = train)
+
+head(baked_train, 5)
 
 
 
