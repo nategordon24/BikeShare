@@ -2,51 +2,54 @@ library(tidymodels)
 library(tidyverse)
 library(dplyr)
 library(vroom)
+library(glmnet)
+library(lubridate)
 
+# 0. Load CSV files
 train <- vroom("train.csv")
-test <- vroom("test.csv")
+test  <- vroom("test.csv")
 
-#1. Remove casual, registered variables, change count to log(count)
-train <- train |>
-  select(-c(registered, casual)) |>
-  mutate(count = log(count))
+# 1. Remove casual, registered variables, change count to log1p(count)
+train <- train %>%
+  select(-any_of(c("registered", "casual")))
 
-#2. Feature engineering (define recipe)
-bike_recipe <- recipe(count~.,data=train) %>%
+# 2. Recipe: encode categoricals + normalize
+bike_recipe <- recipe(count ~ ., data = train) %>%
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
-  step_mutate(weather = factor(weather)) %>%
-  step_date(datetime,features = "hour") %>%
-  step_mutate(season = factor(season)) %>%
-  step_date(timestamp, features="dow")
-  
-my_linear_model <- linear_reg() %>%
-set_engine("lm") %>%
-set_mode("regression")
+  step_time(datetime, features = "hour") %>%
+  step_mutate(
+    hour_sin = sin(2 * pi * datetime_hour / 24),
+    hour_cos = cos(2 * pi * datetime_hour / 24)
+  ) %>%
+  step_date(datetime, features = "dow") %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_rm(datetime)   # remove original datetime column
 
-## Combine into a Workflow and fit
-bike_workflow <- workflow() %>%
-add_recipe(bike_recipe) %>%
-add_model(lin_model) %>%
-fit(data=train)
+# 3. Penalized regression model (glmnet)
+preg_model <- linear_reg(
+  penalty = 0.75,
+  mixture = 1
+) %>%
+  set_engine("glmnet")
 
-## Run all the steps on test data
-lin_preds <- predict(bike_workflow, new_data = test) %>%
-  mutate(count = exp(.pred))
+# 4. Workflow
+preg_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(preg_model) %>%
+  fit(data = train)
 
-# Prep and bake the recipe
-prepped_recipe <- prep(bike_recipe)
-baked_train <- bake(prepped_recipe, new_data = train)
+# 5. Predict on test and back-transform with expm1
+lin_preds <- predict(preg_wf, new_data = test) %>%
+  mutate(count = pmax(0, .pred))
 
-head(baked_train, 5)
+# 6. Kaggle submission (exactly as before)
+kaggle_submission <- lin_preds %>%
+  bind_cols(., test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(count = pmax(0, count)) %>%
+  mutate(datetime = as.character(format(datetime)))
 
-
-
-kaggle_submission <- bike_predictions %>%
-bind_cols(., test) %>% #Bind predictions with test data
-  select(datetime, .pred) %>% #Just keep datetime and prediction variables
-  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
-  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
-  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
-
-## Write out the file
-vroom_write(x=kaggle_submission, file="./LinearPreds.csv", delim=",")
+# 7. Write out the file
+vroom_write(x = kaggle_submission, file = "./LinearPreds.csv", delim = ",")
