@@ -1,6 +1,5 @@
 library(tidymodels)
 library(tidyverse)
-library(dplyr)
 library(vroom)
 library(glmnet)
 library(lubridate)
@@ -9,7 +8,7 @@ library(lubridate)
 train <- vroom("train.csv")
 test  <- vroom("test.csv")
 
-# 1. Remove casual, registered variables, change count to log1p(count)
+# 1. Remove casual, registered variables
 train <- train %>%
   select(-any_of(c("registered", "casual")))
 
@@ -28,22 +27,52 @@ bike_recipe <- recipe(count ~ ., data = train) %>%
 
 # 3. Penalized regression model (glmnet)
 preg_model <- linear_reg(
-  penalty = 0.75,
-  mixture = 1
+  penalty = tune(),
+  mixture = tune()
 ) %>%
   set_engine("glmnet")
 
 # 4. Workflow
 preg_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(preg_model) %>%
+  add_model(preg_model)
+
+# 5. Grid of values to tune over
+grid_of_tuning_params <- grid_regular(
+  penalty(),
+  mixture(),
+  levels = 5
+)
+
+folds <- vfold_cv(data = train, v = 10, repeats = 1)
+
+V_results <- preg_wf %>%
+  tune_grid(
+    resamples = folds,
+    grid = grid_of_tuning_params,
+    metrics = metric_set(rmse, mae)
+  )
+
+# 6. Plot Results
+collect_metrics(V_results) %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = penalty, y = mean, color = factor(mixture))) +
+  geom_line()
+
+# 7. Find Best Tuning Parameters
+bestTune <- V_results %>%
+  select_best(metric = "rmse")
+
+# 8. Finalize the Workflow & fit it
+final_wf <- preg_wf %>%
+  finalize_workflow(bestTune) %>%
   fit(data = train)
 
-# 5. Predict on test and back-transform with expm1
-lin_preds <- predict(preg_wf, new_data = test) %>%
-  mutate(count = pmax(0, .pred))
+# 9. Predict on test set
+lin_preds <- final_wf %>%
+  predict(new_data = test)
 
-# 6. Kaggle submission (exactly as before)
+# 10. Kaggle submission (exactly as before)
 kaggle_submission <- lin_preds %>%
   bind_cols(., test) %>%
   select(datetime, .pred) %>%
@@ -51,5 +80,5 @@ kaggle_submission <- lin_preds %>%
   mutate(count = pmax(0, count)) %>%
   mutate(datetime = as.character(format(datetime)))
 
-# 7. Write out the file
+# 11. Write out the file
 vroom_write(x = kaggle_submission, file = "./LinearPreds.csv", delim = ",")
