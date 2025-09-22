@@ -12,6 +12,15 @@ test  <- vroom("test.csv")
 train <- train %>%
   select(-any_of(c("registered", "casual")))
 
+# Define regression tree model
+my_mod <- decision_tree(
+  tree_depth = tune(),
+  cost_complexity = tune(),
+  min_n = tune()
+) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
 # 2. Recipe: encode categoricals + normalize
 bike_recipe <- recipe(count ~ ., data = train) %>%
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
@@ -23,62 +32,46 @@ bike_recipe <- recipe(count ~ ., data = train) %>%
   step_date(datetime, features = "dow") %>%
   step_dummy(all_nominal_predictors()) %>%
   step_normalize(all_numeric_predictors()) %>%
-  step_rm(datetime)   # remove original datetime column
+  step_rm(datetime)
 
-# 3. Penalized regression model (glmnet)
-preg_model <- linear_reg(
-  penalty = tune(),
-  mixture = tune()
-) %>%
-  set_engine("glmnet")
+# 3. Cross-validation folds
+folds <- vfold_cv(data = train, v = 10, repeats = 1)
 
-# 4. Workflow
-preg_wf <- workflow() %>%
+# --- Regression Tree Section ---
+tree_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(preg_model)
+  add_model(my_mod)
 
-# 5. Grid of values to tune over
-grid_of_tuning_params <- grid_regular(
-  penalty(),
-  mixture(),
+tree_grid <- grid_regular(
+  tree_depth(),
+  cost_complexity(),
+  min_n(),
   levels = 5
 )
 
-folds <- vfold_cv(data = train, v = 10, repeats = 1)
-
-V_results <- preg_wf %>%
+tree_results <- tree_wf %>%
   tune_grid(
     resamples = folds,
-    grid = grid_of_tuning_params,
+    grid = tree_grid,
     metrics = metric_set(rmse, mae)
   )
 
-# 6. Plot Results
-collect_metrics(V_results) %>%
-  filter(.metric == "rmse") %>%
-  ggplot(aes(x = penalty, y = mean, color = factor(mixture))) +
-  geom_line()
-
-# 7. Find Best Tuning Parameters
-bestTune <- V_results %>%
+best_tree <- tree_results %>%
   select_best(metric = "rmse")
 
-# 8. Finalize the Workflow & fit it
-final_wf <- preg_wf %>%
-  finalize_workflow(bestTune) %>%
+final_tree_wf <- tree_wf %>%
+  finalize_workflow(best_tree) %>%
   fit(data = train)
 
-# 9. Predict on test set
-lin_preds <- final_wf %>%
+tree_preds <- final_tree_wf %>%
   predict(new_data = test)
 
-# 10. Kaggle submission (exactly as before)
-kaggle_submission <- lin_preds %>%
-  bind_cols(., test) %>%
+# --- Kaggle Submission ---
+tree_submission <- tree_preds %>%
+  bind_cols(test) %>%
   select(datetime, .pred) %>%
   rename(count = .pred) %>%
   mutate(count = pmax(0, count)) %>%
   mutate(datetime = as.character(format(datetime)))
 
-# 11. Write out the file
-vroom_write(x = kaggle_submission, file = "./LinearPreds.csv", delim = ",")
+vroom_write(tree_submission, file = "./TreePreds.csv", delim = ",")
