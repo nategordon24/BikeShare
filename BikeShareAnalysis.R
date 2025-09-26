@@ -3,6 +3,8 @@ library(tidyverse)
 library(vroom)
 library(glmnet)
 library(lubridate)
+library(bonsai)
+library(lightgbm)
 
 # Load CSV
 train <- vroom("train.csv")
@@ -26,14 +28,16 @@ bike_recipe <- recipe(count ~ ., data = train) %>%
   step_rm(datetime)
 
 # Define model
-my_mod <- rand_forest(mtry = tune(), min_n = tune(), trees = 500) %>%
-  set_engine("ranger") %>%
+bart_model <- bart(trees=tune()) %>% 
+  set_engine("dbarts") %>%
   set_mode("regression")
+                          
+                          
 
 # Workflow
 tree_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(my_mod)
+  add_model(bart_model)
 
 # Grid
 tree_grid <- grid_regular(
