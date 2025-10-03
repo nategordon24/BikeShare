@@ -5,6 +5,10 @@ library(glmnet)
 library(lubridate)
 library(bonsai)
 library(lightgbm)
+library(agua)
+library(h2o)
+
+h2o::h2o.init()
 
 # Load CSV
 train <- vroom("train.csv")
@@ -14,8 +18,12 @@ test  <- vroom("test.csv")
 train <- train %>%
   select(-any_of(c("registered", "casual")))
 
+# -----------------------
 # Recipe
+# -----------------------
 bike_recipe <- recipe(count ~ ., data = train) %>%
+  step_log(all_outcomes(), offset = 1) %>%   # log1p(count), only during training
+  
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
   step_time(datetime, features = "hour") %>%
   step_mutate(
@@ -27,48 +35,36 @@ bike_recipe <- recipe(count ~ ., data = train) %>%
   step_normalize(all_numeric_predictors()) %>%
   step_rm(datetime)
 
-# Define model
-bart_model <- bart(trees=tune()) %>% 
-  set_engine("dbarts") %>%
+# -----------------------
+# Model
+# -----------------------
+auto_model <- auto_ml() %>%
+  set_engine("h2o", max_runtime_secs = 240, max_models = 50) %>% 
   set_mode("regression")
-                          
-                          
 
+# -----------------------
 # Workflow
-tree_wf <- workflow() %>%
+# -----------------------
+automl_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(bart_model)
+  add_model(auto_model) %>%
+  fit(data = train)
 
-# Grid
-tree_grid <- grid_regular(
-  mtry(range = c(1, 17)),
-  min_n(),
-  levels = 5
-)
+# -----------------------
+# Predictions (back-transform)
+# -----------------------
+tree_preds <- predict(automl_wf, new_data = test) %>%
+  mutate(.pred = pmax(0, expm1(.pred)))   # undo log1p()
 
-# CV folds
-folds <- vfold_cv(train, v = 10)
-
-# Tune
-tree_results <- tree_wf %>%
-  tune_grid(
-    resamples = folds,
-    grid = tree_grid,
-    metrics = metric_set(rmse, mae)
-  )
-
-best_tree <- tree_results %>% select_best(metric = "rmse")
-
-final_tree_wf <- tree_wf %>% finalize_workflow(best_tree) %>% fit(train)
-
-tree_preds <- predict(final_tree_wf, new_data = test)
-
+# -----------------------
 # Kaggle submission
+# -----------------------
 tree_submission <- tree_preds %>%
   bind_cols(test) %>%
   select(datetime, .pred) %>%
   rename(count = .pred) %>%
-  mutate(count = pmax(0, count),
+  mutate(count = round(count),                # optional: round to integer
          datetime = as.character(format(datetime)))
 
 vroom_write(tree_submission, "./TreePreds.csv", delim = ",")
+
